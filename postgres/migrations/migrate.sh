@@ -1,11 +1,21 @@
-
 #!/usr/bin/env bash
+
+WORKERS=10
+DATABASE="medik8-staging6jul26"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --workers) WORKERS="$2"; shift 2 ;;
+        --database) DATABASE="$2"; shift 2 ;;
+        *) echo "Unknown option: $1" >&2; exit 2 ;;
+    esac
+done
 
 START=$SECONDS
 
-for i in 1 2 3 4; do
+for ((i = 1; i <= WORKERS; i++)); do
     PGAPPNAME="edi_migration_$i" \
-    psql -d medik8-staging6jul26 -f worker.sql 2>&1 \
+    psql -d "$DATABASE" -f worker.sql 2>&1 \
       | tee "worker_$i.log" &
 done
 
@@ -20,9 +30,6 @@ printf 'Total elapsed time: %02d:%02d:%02d\n' \
     $((ELAPSED % 60))
 
 printf '\nWorker logs:\n'
-ls -lh worker_{1..4}.log
-
-printf '\nRemaining NULL records:\n'
-psql -d medik8-staging6jul26 -t -A -c \
-  "SELECT COUNT(*) FROM account_move WHERE edi_status IS NULL;"
-
+for ((i = 1; i <= WORKERS; i++)); do
+    ls -lh "worker_$i.log"
+done

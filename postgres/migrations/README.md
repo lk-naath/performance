@@ -1,17 +1,19 @@
-# Parallel PostgreSQL update
+# Parallel PostgreSQL backfill
 
-The migration query lives in [`worker.sql`](worker.sql). The Bash runner starts independent `psql` sessions; `FOR UPDATE SKIP LOCKED` lets each session claim a different batch.
-
-## Run with four workers
+Run the migration with four workers and the default database:
 
 ```sh
-postgres/migrations/run.sh --workers 4 --database medik8-staging6jul26
+postgres/migrations/migrate.sh
 ```
 
-The defaults are four workers, database `medik8-staging6jul26` (or `PGDATABASE`), and `worker.sql` in this folder. Logs are saved under `postgres/migrations/logs/` with a timestamp and worker number. The runner prints elapsed time, checks worker failures, and reports how many `account_move` rows still have a `NULL` EDI status.
+Pass options to choose the worker count and database:
 
-Try worker counts such as 1, 2, 4, and 8 on comparable data and database load. More workers can increase contention, so compare elapsed time and database load rather than assuming the largest count is fastest.
+```sh
+postgres/migrations/migrate.sh --workers 20 --database medik8-staging6jul26
+```
 
-## Change the work
+You can also use `WORKERS` and `PGDATABASE` environment variables. Command-line options override those values. Defaults are four workers and database `medik8-staging6jul26`.
 
-Edit `worker.sql` to change the target table, assignment, predicate, or batch size. Every worker executes the same SQL file. The selected rows should stop matching the `WHERE` condition after update so workers eventually finish.
+The runner creates a temporary non-unique partial index on `public.account_move(id)` for rows where `edi_status IS NULL`, starts the workers, checks worker exit status and remaining rows, and drops the index concurrently after a successful run. If a worker fails or rows remain, the index is left in place for diagnosis or retry. Logs are written under `postgres/migrations/logs/` with a timestamp and worker number.
+
+The concurrent index build and drop avoid an exclusive lock that blocks normal table writes, but use I/O and the temporary index consumes disk space during the backfill. Compare worker counts such as 1, 2, 4, and 8 on comparable database load; more workers can increase contention.
