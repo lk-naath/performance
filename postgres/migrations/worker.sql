@@ -1,8 +1,12 @@
 \set ON_ERROR_STOP on
 
--- Each worker repeatedly claims small, ordered batches with SKIP LOCKED.
--- A commit after every batch keeps transactions and row locks short while
--- allowing all workers to share the same work queue.
+-- Add or edit backfill rules in the table below. Each rule has:
+--   1. table_name: the table to update (must have an id column)
+--   2. assignments: values to set, using COALESCE to preserve existing values
+--   3. rows_to_fix: the condition that identifies rows needing an update
+--
+-- The batch runner below is shared by every rule. Each worker claims up to
+-- 10,000 rows at a time. SKIP LOCKED lets workers process different rows.
 DO $$
 DECLARE
     job RECORD;
@@ -11,20 +15,40 @@ DECLARE
     total_updated BIGINT;
     started_at TIMESTAMPTZ;
 BEGIN
+    -- ================================================================
+    -- BACKFILL RULES: add one row here for each table.
+    -- Example:
+    --   ('my_table', 'my_field = COALESCE(my_field, ''default'')',
+    --    'my_field IS NULL'),
+    -- ================================================================
     FOR job IN
-        SELECT * FROM (VALUES
+        SELECT *
+        FROM (VALUES
             ('sale_order',
-             'edi_status = COALESCE(edi_status, ''draft''), edi_tset_purpose_code = COALESCE(edi_tset_purpose_code, ''00''), edi_fob_pay_code = COALESCE(edi_fob_pay_code, ''PP'')',
-             'edi_status IS NULL OR edi_tset_purpose_code IS NULL OR edi_fob_pay_code IS NULL'),
+             'edi_status = COALESCE(edi_status, ''draft''), ' ||
+             'edi_tset_purpose_code = COALESCE(edi_tset_purpose_code, ''00''), ' ||
+             'edi_fob_pay_code = COALESCE(edi_fob_pay_code, ''PP'')',
+             'edi_status IS NULL OR ' ||
+             'edi_tset_purpose_code IS NULL OR ' ||
+             'edi_fob_pay_code IS NULL'),
             ('purchase_order',
-             'edi_status = COALESCE(edi_status, ''draft''), edi_tset_purpose_code = COALESCE(edi_tset_purpose_code, ''00'')',
+             'edi_status = COALESCE(edi_status, ''draft''), ' ||
+             'edi_tset_purpose_code = COALESCE(edi_tset_purpose_code, ''00'')',
              'edi_status IS NULL OR edi_tset_purpose_code IS NULL'),
             ('account_move',
-             'edi_status = COALESCE(edi_status, ''draft''), edi_tset_purpose_code = COALESCE(edi_tset_purpose_code, ''00''), edi_fob_pay_code = COALESCE(edi_fob_pay_code, ''PP'')',
-             'edi_status IS NULL OR edi_tset_purpose_code IS NULL OR edi_fob_pay_code IS NULL'),
+             'edi_status = COALESCE(edi_status, ''draft''), ' ||
+             'edi_tset_purpose_code = COALESCE(edi_tset_purpose_code, ''00''), ' ||
+             'edi_fob_pay_code = COALESCE(edi_fob_pay_code, ''PP'')',
+             'edi_status IS NULL OR ' ||
+             'edi_tset_purpose_code IS NULL OR ' ||
+             'edi_fob_pay_code IS NULL'),
             ('res_partner',
-             'edi_status = COALESCE(edi_status, ''draft''), edi_location_code_qualifier = COALESCE(edi_location_code_qualifier, ''92''), edi_invoice_on_delivery = COALESCE(edi_invoice_on_delivery, ''none'')',
-             'edi_status IS NULL OR edi_location_code_qualifier IS NULL OR edi_invoice_on_delivery IS NULL'),
+             'edi_status = COALESCE(edi_status, ''draft''), ' ||
+             'edi_location_code_qualifier = COALESCE(edi_location_code_qualifier, ''92''), ' ||
+             'edi_invoice_on_delivery = COALESCE(edi_invoice_on_delivery, ''none'')',
+             'edi_status IS NULL OR ' ||
+             'edi_location_code_qualifier IS NULL OR ' ||
+             'edi_invoice_on_delivery IS NULL'),
             ('account_move_line',
              'allow_chrg_percent_qual = ''1''',
              'allow_chrg_percent_qual IS NULL'),
@@ -34,11 +58,12 @@ BEGIN
             ('stock_move',
              'edi_pack_qualifier = ''OU''',
              'edi_pack_qualifier IS NULL')
-        ) AS jobs(table_name, assignments, null_filter)
+        ) AS backfill_rules(table_name, assignments, rows_to_fix)
     LOOP
         total_updated := 0;
         started_at := clock_timestamp();
 
+        -- Keep taking batches from this table until no matching rows remain.
         LOOP
             EXECUTE format(
                 'WITH batch AS (
@@ -53,7 +78,7 @@ BEGIN
                  SET %s
                  FROM batch
                  WHERE target.id = batch.id',
-                job.table_name, job.null_filter,
+                job.table_name, job.rows_to_fix,
                 job.table_name, job.assignments
             );
 
@@ -71,7 +96,7 @@ BEGIN
             -- remaining rows. Check after releasing this transaction's locks.
             EXECUTE format(
                 'SELECT EXISTS (SELECT 1 FROM %I WHERE %s)',
-                job.table_name, job.null_filter
+                job.table_name, job.rows_to_fix
             ) INTO remaining;
 
             IF remaining THEN
