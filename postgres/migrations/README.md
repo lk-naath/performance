@@ -1,19 +1,28 @@
 # Parallel PostgreSQL backfill
 
-Run the migration with four workers and the default database:
+`worker.sql` contains the complete backfill from the project-root `migrate.sql`.
+It processes all seven tables in batches of 10,000 rows. Each batch is committed
+independently, and `FOR UPDATE SKIP LOCKED` lets concurrent workers claim
+different rows without duplicating work. The updates only fill NULL values, so
+the migration can be safely rerun after an interruption.
+
+Run with 16 workers and the default database:
 
 ```sh
 postgres/migrations/migrate.sh
 ```
 
-Pass options to choose the worker count and database:
+Choose a worker count and database as needed:
 
 ```sh
-postgres/migrations/migrate.sh --workers 20 --database medik8-staging6jul26
+postgres/migrations/migrate.sh --workers 16 --database medik8-staging6jul26
 ```
 
-You can also use `WORKERS` and `PGDATABASE` environment variables. Command-line options override those values. Defaults are four workers and database `medik8-staging6jul26`.
+The runner also accepts `WORKERS` and `PGDATABASE` environment variables;
+command-line options take precedence. Worker logs are written to
+`postgres/migrations/logs/` with a timestamp and worker number. The runner
+returns a failure status if any `psql` worker fails.
 
-The runner creates a temporary non-unique partial index on `public.account_move(id)` for rows where `edi_status IS NULL`, starts the workers, checks worker exit status and remaining rows, and drops the index concurrently after a successful run. If a worker fails or rows remain, the index is left in place for diagnosis or retry. Logs are written under `postgres/migrations/logs/` with a timestamp and worker number.
-
-The concurrent index build and drop avoid an exclusive lock that blocks normal table writes, but use I/O and the temporary index consumes disk space during the backfill. Compare worker counts such as 1, 2, 4, and 8 on comparable database load; more workers can increase contention.
+The default is 16 workers. More workers can increase I/O and lock contention,
+so lower the count if the database is already under heavy load. The SQL batch
+limit is set to 10,000 rows.
