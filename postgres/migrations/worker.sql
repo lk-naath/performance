@@ -5,9 +5,12 @@
 --   2. assignments: values to set, using COALESCE to preserve existing values
 --   3. rows_to_fix: the condition that identifies rows needing an update
 --
--- The batch runner below is shared by every rule. Each worker claims up to
--- 10,000 rows at a time. SKIP LOCKED lets workers process different rows.
-DO $$
+-- The procedure is temporary to this psql session, so nothing is installed
+-- permanently in the database. It commits after each batch, which a function
+-- cannot do; call it directly (without wrapping this file in BEGIN/COMMIT).
+CREATE PROCEDURE pg_temp.run_backfill()
+LANGUAGE plpgsql
+AS $$
 DECLARE
     job RECORD;
     affected INTEGER;
@@ -87,8 +90,6 @@ BEGIN
 
             IF affected > 0 THEN
                 COMMIT;
-                RAISE NOTICE '% | elapsed: % | updated: %',
-                    job.table_name, clock_timestamp() - started_at, total_updated;
                 CONTINUE;
             END IF;
 
@@ -106,6 +107,13 @@ BEGIN
                 EXIT;
             END IF;
         END LOOP;
+
+        IF total_updated > 0 THEN
+            RAISE NOTICE '%: updated % rows in %',
+                job.table_name, total_updated, clock_timestamp() - started_at;
+        END IF;
     END LOOP;
 END
 $$;
+
+CALL pg_temp.run_backfill();
